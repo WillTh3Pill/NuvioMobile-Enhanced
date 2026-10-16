@@ -16,20 +16,6 @@ final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserN
         return true
     }
 
-    // A connected display arrives as its own scene; the player claims it while open (ExternalDisplay.swift).
-    func application(
-        _ application: UIApplication,
-        configurationForConnecting connectingSceneSession: UISceneSession,
-        options: UIScene.ConnectionOptions
-    ) -> UISceneConfiguration {
-        guard connectingSceneSession.role == .windowExternalDisplayNonInteractive else {
-            return connectingSceneSession.configuration
-        }
-        let configuration = UISceneConfiguration(name: "External Display", sessionRole: connectingSceneSession.role)
-        configuration.delegateClass = ExternalDisplaySceneDelegate.self
-        return configuration
-    }
-
     func application(
         _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
