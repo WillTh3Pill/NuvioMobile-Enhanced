@@ -2537,8 +2537,8 @@ final class MPVPlayerBridgeCreator: NSObject, NuvioPlayerBridgeCreator {
         return MPVPlayerBridgeImpl()
     }
 
-    func createExternalDisplayBridge() -> (any NuvioPlayerBridge)? {
-        AVPlayerBridgeImpl.isExternalDisplayConnected ? AVPlayerBridgeImpl() : nil
+    func createAVPlayerBridge() -> any NuvioPlayerBridge {
+        AVPlayerBridgeImpl()
     }
 }
 

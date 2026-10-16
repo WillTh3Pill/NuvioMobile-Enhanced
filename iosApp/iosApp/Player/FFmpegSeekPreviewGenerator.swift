@@ -264,7 +264,7 @@ final class FFmpegSeekPreviewGenerator: NSObject, NuvioSeekPreviewGenerator {
         return nil
     }
 
-    private static func describe(_ code: Int32) -> String {
+    static func describe(_ code: Int32) -> String {
         var buffer = [CChar](repeating: 0, count: 128)
         _ = av_strerror(code, &buffer, buffer.count)
         return "\(String(cString: buffer)) (\(code))"
@@ -348,7 +348,7 @@ final class FFmpegSeekPreviewGenerator: NSObject, NuvioSeekPreviewGenerator {
     }
 }
 
-private final class SeekPreviewAbortFlag {
+final class SeekPreviewAbortFlag {
     private let lock = NSLock()
     private var value = false
 

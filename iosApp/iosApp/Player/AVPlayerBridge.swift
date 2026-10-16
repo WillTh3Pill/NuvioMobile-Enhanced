@@ -4,30 +4,11 @@ import MediaPlayer
 import UIKit
 import ComposeApp
 
-/// Player used while an external display is connected (USB-C/HDMI dock or AirPlay mirroring).
-/// AVPlayer's external playback hands video straight to the display, so the TV gets full-screen
-/// video at its own aspect ratio and keeps playing with the iPad locked. mpv can't do that: it
-/// renders with the app's GPU access, which iOS revokes in the background.
-/// Anything AVPlayer can't open (MKV, DTS, separate audio, …) surfaces as an error and
-/// PlayerEngine.ios.kt falls back to mpv.
+/// Stream player. AVPlayer's external playback hands video straight to a connected display (USB-C/HDMI
+/// dock, AirPlay), so the TV gets full-screen video at its own aspect ratio and keeps playing with the
+/// iPad locked, which mpv can't do because it renders with the app's GPU access that iOS revokes in the
+/// background. Containers AVPlayer can't open (MKV, …) are repackaged losslessly by HLSRemuxer.
 final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
-
-    // Any one signal counts: which of them fires varies with iPadOS version and with mirroring vs.
-    // extended mode, and a scene-based app may not see a mirrored dock in UIScreen.screens at all.
-    // The HDMI/DisplayPort audio route is what the dock itself reports.
-    static var isExternalDisplayConnected: Bool {
-        let screens = UIScreen.screens.count
-        let externalScene = UIApplication.shared.connectedScenes.contains {
-            $0.session.role == .windowExternalDisplayNonInteractive
-        }
-        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType)
-        let videoRoute = outputs.contains { $0 == .HDMI || $0 == .displayPort }
-        InAppLogBridge.shared.info(
-            tag: "Player/ExternalDisplay",
-            message: "screens=\(screens) externalScene=\(externalScene) audioOutputs=\(outputs.map(\.rawValue))"
-        )
-        return screens > 1 || externalScene || videoRoute
-    }
 
     private let player = AVPlayer()
     private lazy var playerVC: AVPlayerViewController = {
@@ -38,6 +19,9 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         vc.view.backgroundColor = .black
         return vc
     }()
+    private var remuxer: HLSRemuxer?
+    private var lastLoad: (url: String, headersJson: String?)?
+    private var wantsPlayback = false
     private var unsupportedReason = ""
     private var isEnded = false
     private var endObserver: NSObjectProtocol?
@@ -45,6 +29,8 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
     private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
+
+    private static let nativeExtensions: Set<String> = ["mp4", "m4v", "mov", "m3u8"]
 
     override init() {
         super.init()
@@ -64,11 +50,15 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         loadFileWithAudio(videoUrl: url, audioUrl: nil, headersJson: nil, subtitlesJson: nil)
     }
 
-    // External subtitle files can't be sideloaded into AVPlayer; only embedded/HLS tracks show.
+    // External subtitle files aren't wired into AVPlayer yet; embedded/HLS tracks show.
     func loadFileWithAudio(videoUrl: String, audioUrl: String?, headersJson: String?, subtitlesJson: String?) {
+        remuxer?.stop()
+        remuxer = nil
+        player.replaceCurrentItem(with: nil)
         isEnded = false
         audioGroup = nil
         subtitleGroup = nil
+        lastLoad = (videoUrl, headersJson)
         if let audioUrl, !audioUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             unsupportedReason = "AVPlayer can't merge a separate audio stream"
             return
@@ -83,7 +73,30 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         let headers = headersJson?.data(using: .utf8)
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }?
             .filter { $0.key.caseInsensitiveCompare("Range") != .orderedSame } ?? [:]
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+
+        if Self.nativeExtensions.contains(url.pathExtension.lowercased()) {
+            playItem(url, headers: headers)
+            return
+        }
+        let remuxer = HLSRemuxer(url: videoUrl, headers: headers)
+        self.remuxer = remuxer
+        remuxer.start { [weak self] result in
+            guard let self, self.remuxer === remuxer else { return }
+            switch result {
+            case .success(.remux(let localUrl)):
+                self.playItem(localUrl, headers: [:])
+            case .success(.playDirectly):
+                remuxer.stop()
+                self.remuxer = nil
+                self.playItem(url, headers: headers)
+            case .failure(let error):
+                self.unsupportedReason = error.localizedDescription
+            }
+        }
+    }
+
+    private func playItem(_ url: URL, headers: [String: String]) {
+        let asset = AVURLAsset(url: url, options: headers.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
         item.externalMetadata = metadata
 
@@ -92,6 +105,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in self?.isEnded = true }
         player.replaceCurrentItem(with: item)
+        if wantsPlayback { player.play() }
 
         Task { @MainActor [weak self] in
             let audio = try? await asset.loadMediaSelectionGroup(for: .audible)
@@ -103,6 +117,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     }
 
     func play() {
+        wantsPlayback = true
         // Same serial queue as mpv, so a teardown deactivation can't land after this activation.
         MPVPlayerViewController.audioSessionQueue.async {
             let session = AVAudioSession.sharedInstance()
@@ -112,7 +127,10 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         player.play() // starts at player.defaultRate
     }
 
-    func pause() { player.pause() }
+    func pause() {
+        wantsPlayback = false
+        player.pause()
+    }
 
     func seekTo(positionMs: Int64) {
         isEnded = false
@@ -121,8 +139,10 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
 
     func seekBy(offsetMs: Int64) { seekTo(positionMs: max(0, getPositionMs() + offsetMs)) }
 
-    // Errors hand playback to mpv (PlayerEngine.ios.kt), so there is nothing to retry here.
-    func retry() {}
+    func retry() {
+        guard let lastLoad else { return }
+        loadFileWithAudio(videoUrl: lastLoad.url, audioUrl: nil, headersJson: lastLoad.headersJson, subtitlesJson: nil)
+    }
 
     func setPlaybackSpeed(speed: Float) {
         player.defaultRate = speed
@@ -131,7 +151,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
 
     func getPlaybackSpeed() -> Float { player.defaultRate }
 
-    // ponytail: AVPlayer volume caps at 1.0, so mpv's 200% boost is unavailable while docked.
+    // ponytail: AVPlayer volume caps at 1.0, so mpv's 200% boost is unavailable.
     func getVolume() -> Float { player.volume }
     func setVolume(volume: Float) { player.volume = min(max(volume, 0), 1) }
     func setMuted(muted: Bool) { player.isMuted = muted }
@@ -163,7 +183,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     // MARK: State (polled from Kotlin every 250ms)
 
     func getIsLoading() -> Bool {
-        guard let item = player.currentItem else { return true }
+        guard let item = player.currentItem else { return unsupportedReason.isEmpty }
         return item.status == .unknown || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
     }
 
@@ -183,10 +203,14 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
 
     func getErrorMessage() -> String {
         if !unsupportedReason.isEmpty { return unsupportedReason }
-        return player.currentItem?.error.map { "AVPlayer: \($0.localizedDescription)" } ?? ""
+        guard let error = player.currentItem?.error else { return "" }
+        let detail = remuxer?.lastError.map { " (\($0))" } ?? ""
+        return "AVPlayer: \(error.localizedDescription)\(detail)"
     }
 
-    func getMediaInfoJson() -> String { #"{"engine":"avplayer"}"# }
+    func getMediaInfoJson() -> String {
+        remuxer == nil ? #"{"engine":"avplayer"}"# : #"{"engine":"avplayer (lossless MKV repackaging)"}"#
+    }
 
     private static func ms(_ time: CMTime?) -> Int64 {
         guard let seconds = time?.seconds, seconds.isFinite, seconds > 0 else { return 0 }
@@ -281,6 +305,8 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     func getProperty(name: String) -> String { "" }
 
     func destroy() {
+        remuxer?.stop()
+        remuxer = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
