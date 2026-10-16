@@ -1566,7 +1566,7 @@ final class MPVPlayerViewController: UIViewController {
         teardownMpvCore()
     }
 
-    private static let audioSessionQueue = DispatchQueue(label: "nuvio.audio-session", qos: .userInitiated)
+    static let audioSessionQueue = DispatchQueue(label: "nuvio.audio-session", qos: .userInitiated)
     private static let slowAudioSessionCallMs = 500.0
 
     private func activateAudioSessionForPlayback() {
@@ -2535,6 +2535,10 @@ final class MPVPlayerViewController: UIViewController {
 final class MPVPlayerBridgeCreator: NSObject, NuvioPlayerBridgeCreator {
     func createBridge() -> any NuvioPlayerBridge {
         return MPVPlayerBridgeImpl()
+    }
+
+    func createExternalDisplayBridge() -> (any NuvioPlayerBridge)? {
+        AVPlayerBridgeImpl.isExternalDisplayConnected ? AVPlayerBridgeImpl() : nil
     }
 }
 

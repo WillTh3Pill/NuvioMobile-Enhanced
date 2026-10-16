@@ -111,6 +111,8 @@ object NuvioPlayerBridgeFactory {
 
     fun create(): NuvioPlayerBridge? = factoryRef?.createBridge()
 
+    fun createExternalDisplay(): NuvioPlayerBridge? = factoryRef?.createExternalDisplayBridge()
+
     val isRegistered: Boolean get() = factoryRef != null
 }
 
@@ -120,4 +122,7 @@ object NuvioPlayerBridgeFactory {
  */
 interface NuvioPlayerBridgeCreator {
     fun createBridge(): NuvioPlayerBridge
+
+    /** AVPlayer bridge while an external display is connected, otherwise null. */
+    fun createExternalDisplayBridge(): NuvioPlayerBridge?
 }

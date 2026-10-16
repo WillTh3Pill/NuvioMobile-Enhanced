@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
@@ -73,9 +74,18 @@ actual fun PlatformPlayerSurface(
     val experimentalSinglePrimaryPictureInPictureEnabled =
         IosExperimentalPictureInPictureSettingsStorage.loadSinglePrimaryRendererEnabled()
 
-    val bridge = remember {
-        NuvioPlayerBridgeFactory.create()
+    // Docked to an external display (USB-C/HDMI or AirPlay mirroring): try AVPlayer first so the TV
+    // gets full-screen video that keeps playing with the iPad locked, and fall back to mpv when
+    // AVPlayer can't open the stream — the same pattern as Android's Auto engine.
+    var tryExternalDisplayBridge by remember { mutableStateOf(true) }
+    val externalDisplayBridge = remember(tryExternalDisplayBridge) {
+        if (tryExternalDisplayBridge) NuvioPlayerBridgeFactory.createExternalDisplay() else null
     }
+    val bridge = remember(externalDisplayBridge) {
+        externalDisplayBridge ?: NuvioPlayerBridgeFactory.create()
+    }
+    val latestOnInitialPositionHandled = rememberUpdatedState(onInitialPositionHandled)
+    val latestInitialPositionRequestKey = rememberUpdatedState(initialPositionRequestKey)
 
     if (bridge == null) {
         LaunchedEffect(Unit) {
@@ -450,6 +460,13 @@ actual fun PlatformPlayerSurface(
             )
             latestOnSnapshot.value(snapshot)
             val errorMessage = bridge.getErrorMessage().ifBlank { null }
+            if (errorMessage != null && externalDisplayBridge != null) {
+                InAppLogger.warn("Player/iOS", "AVPlayer failed; falling back to mpv: $errorMessage")
+                // Lets the screen re-apply the resume position on the mpv controller.
+                latestInitialPositionRequestKey.value?.let { latestOnInitialPositionHandled.value(it, false) }
+                tryExternalDisplayBridge = false
+                break
+            }
             if (errorMessage != lastReportedError) {
                 lastReportedError = errorMessage
                 if (errorMessage != null) {
@@ -471,30 +488,33 @@ actual fun PlatformPlayerSurface(
 
     // Render the player view
     Box(modifier = modifier) {
-        UIKitViewController(
-            factory = { bridge.createPlayerViewController() },
-            modifier = Modifier
-                .fillMaxSize()
-                .onSizeChanged { size ->
-                    if (size.width > 1 && size.height > 1) {
+        // UIKitViewController only calls its factory once, so re-key it when the bridge is swapped.
+        key(bridge) {
+            UIKitViewController(
+                factory = { bridge.createPlayerViewController() },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { size ->
+                        if (size.width > 1 && size.height > 1) {
+                            bridge.syncVideoSurfaceLayout(
+                                width = with(density) { size.width.toDp().value.toDouble() },
+                                height = with(density) { size.height.toDp().value.toDouble() },
+                            )
+                        }
+                    },
+                onResize = { viewController, rect ->
+                    viewController.view.setFrame(rect)
+                    rect.useContents {
                         bridge.syncVideoSurfaceLayout(
-                            width = with(density) { size.width.toDp().value.toDouble() },
-                            height = with(density) { size.height.toDp().value.toDouble() },
+                            width = size.width,
+                            height = size.height,
                         )
                     }
                 },
-            onResize = { viewController, rect ->
-                viewController.view.setFrame(rect)
-                rect.useContents {
-                    bridge.syncVideoSurfaceLayout(
-                        width = size.width,
-                        height = size.height,
-                    )
-                }
-            },
-            interactive = false,
-        )
-        
+                interactive = false,
+            )
+        }
+
         if (useNativeController) {
             var isPlayingLocal by remember { mutableStateOf(playWhenReady) }
             
