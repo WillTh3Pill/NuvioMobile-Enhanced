@@ -35,11 +35,11 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
             videoUrl,
             audioUrl: audioUrl,
             requestHeaders: parseRequestHeaders(headersJson),
-            subtitles: parseSubtitles(subtitlesJson)
+            subtitles: Self.parseSubtitles(subtitlesJson)
         )
     }
 
-    private func parseSubtitles(_ json: String?) -> [PluginSubtitle] {
+    static func parseSubtitles(_ json: String?) -> [PluginSubtitle] {
         guard
             let json,
             let data = json.data(using: .utf8),
