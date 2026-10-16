@@ -138,6 +138,112 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
     val gestureCallbacks = rememberSurfaceGestureCallbacks()
     val playbackGesturesEnabled = initialLoadCompleted && errorMessage == null
 
+    // Compose only delivers key events to the focused subtree, and overlays take focus while they
+    // are open, so focus is re-requested whenever the last one closes.
+    val keyboardFocusRequester = remember { FocusRequester() }
+    val keyboardShortcutsEnabled = remember {
+        derivedStateOf { !isAnyOverlayVisible && !playerControlsLocked && !isMiniPresentation }
+    }
+    val onKeyboardShortcut = rememberUpdatedState(::handleKeyboardShortcut)
+    LaunchedEffect(keyboardShortcutsEnabled.value) {
+        if (keyboardShortcutsEnabled.value) {
+            runCatching { keyboardFocusRequester.requestFocus() }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { layoutSize = it }
+            .playerKeyboardShortcuts(
+                focusRequester = keyboardFocusRequester,
+                enabledState = keyboardShortcutsEnabled,
+                onShortcutState = onKeyboardShortcut,
+            )
+            .playerSurfaceTapGestures(
+                layoutSize = layoutSize,
+                playbackGesturesEnabled = playbackGesturesEnabled,
+                playerControlsLockedState = gestureCallbacks.playerControlsLocked,
+                onSurfaceTap = gestureCallbacks.onSurfaceTap,
+                onSurfaceDoubleTap = gestureCallbacks.onSurfaceDoubleTap,
+                activateHoldToSpeedState = gestureCallbacks.activateHoldToSpeed,
+                deactivateHoldToSpeedState = gestureCallbacks.deactivateHoldToSpeed,
+                revealLockedOverlayState = gestureCallbacks.revealLockedOverlay,
+            )
+            .playerSurfaceDragGestures(
+                gestureController = gestureController,
+                playerController = playerController,
+                layoutSize = layoutSize,
+                playbackGesturesEnabled = playbackGesturesEnabled,
+                sideGestureSystemEdgeExclusionPx = sideGestureSystemEdgeExclusionPx,
+                playerControlsLockedState = gestureCallbacks.playerControlsLocked,
+                touchGesturesEnabledState = gestureCallbacks.touchGesturesEnabled,
+                swipeToSeekEnabledState = gestureCallbacks.swipeToSeekEnabled,
+                isHoldToSpeedGestureActiveState = gestureCallbacks.isHoldToSpeedGestureActive,
+                currentPositionMsState = gestureCallbacks.currentPositionMs,
+                currentDurationMsState = gestureCallbacks.currentDurationMs,
+                deactivateHoldToSpeedState = gestureCallbacks.deactivateHoldToSpeed,
+                showHorizontalSeekPreviewState = gestureCallbacks.showHorizontalSeekPreview,
+                showBrightnessFeedbackState = gestureCallbacks.showBrightnessFeedback,
+                showVolumeFeedbackState = gestureCallbacks.showVolumeFeedback,
+                clearLiveGestureFeedbackState = gestureCallbacks.clearLiveGestureFeedback,
+                revealLockedOverlayState = gestureCallbacks.revealLockedOverlay,
+                commitHorizontalSeekState = gestureCallbacks.commitHorizontalSeek,
+            ),
+    ) {
+        if (playerSurfaceInLogicHost) PlaybackVideo(Modifier.fillMaxSize()) else PlayerSurface()
+
+        if (!isMiniPresentation) {
+        AnimatedVisibility(
+            visible = playerSettingsUiState.pauseOverlayEnabled && pausedOverlayVisible && !controlsVisible && !playerControlsLocked,
+            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 180)),
+        ) {
+            PauseMetadataOverlay(
+                title = if (isLiveTvPlayback) activeStreamTitle else title,
+                logo = if (isLiveTvPlayback) activeLogo else logo,
+                isEpisode = isEpisode,
+                seasonNumber = activeSeasonNumber,
+                episodeNumber = activeEpisodeNumber,
+                episodeTitle = activeEpisodeTitle,
+                pauseDescription = activePauseDescription ?: activeStreamSubtitle,
+                providerName = activeProviderName,
+                metrics = metrics,
+                horizontalSafePadding = horizontalSafePadding,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        RenderPlayerControls(isEpisode = isEpisode)
+        RenderPlaybackOverlays(
+            runtime = runtime,
+            currentGestureFeedback = currentGestureFeedback,
+            p2pInitialLoadingMessage = p2pInitialLoadingMessage,
+            p2pInitialLoadingProgress = p2pInitialLoadingProgress,
+            showP2pRebufferStats = showP2pRebufferStats,
+            p2pRebufferMessage = p2pRebufferMessage,
+            p2pRebufferProgress = p2pRebufferProgress,
+        )
+        SubtitleSyncByEarCard(
+            visible = showSubtitleSyncByEar,
+            subtitleDelayMs = subtitleDelayMs,
+            heardCaptured = subtitleSyncHeardPositionMs != null,
+            sawCaptured = subtitleSyncSawPositionMs != null,
+            onHeard = { captureSubtitleSyncHeard() },
+            onSaw = { captureSubtitleSyncSaw() },
+            onClose = { closeSubtitleSyncByEar() },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 16.dp, start = horizontalSafePadding, end = horizontalSafePadding),
+        )
+        RenderPlayerModals()
+        }
+    }
+}
+
+/** Effects that follow the active source; they run in [PlaybackLogicHost]. */
+@Composable
+internal fun PlayerScreenRuntime.BindPlaybackSourceEffects() {
     LaunchedEffect(activeSourceUrl, activeSourceAudioUrl, activeSourceHeaders, activeTorrentInfoHash) {
         val resolvingSourceUrl = activeSourceUrl
         val resolvingAudioUrl = activeSourceAudioUrl
@@ -202,167 +308,71 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi() {
         }
     }
 
-    // Compose only delivers key events to the focused subtree, and overlays take focus while they
-    // are open, so focus is re-requested whenever the last one closes.
-    val keyboardFocusRequester = remember { FocusRequester() }
-    val keyboardShortcutsEnabled = remember {
-        derivedStateOf { !isAnyOverlayVisible && !playerControlsLocked && !isMiniPresentation }
-    }
-    val onKeyboardShortcut = rememberUpdatedState(::handleKeyboardShortcut)
-    LaunchedEffect(keyboardShortcutsEnabled.value) {
-        if (keyboardShortcutsEnabled.value) {
-            runCatching { keyboardFocusRequester.requestFocus() }
-        }
-    }
-
     BindAutoSyncRuntimeEffects() // AutoSync hook
+}
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged { layoutSize = it }
-            .playerKeyboardShortcuts(
-                focusRequester = keyboardFocusRequester,
-                enabledState = keyboardShortcutsEnabled,
-                onShortcutState = onKeyboardShortcut,
-            )
-            .playerSurfaceTapGestures(
-                layoutSize = layoutSize,
-                playbackGesturesEnabled = playbackGesturesEnabled,
-                playerControlsLockedState = gestureCallbacks.playerControlsLocked,
-                onSurfaceTap = gestureCallbacks.onSurfaceTap,
-                onSurfaceDoubleTap = gestureCallbacks.onSurfaceDoubleTap,
-                activateHoldToSpeedState = gestureCallbacks.activateHoldToSpeed,
-                deactivateHoldToSpeedState = gestureCallbacks.deactivateHoldToSpeed,
-                revealLockedOverlayState = gestureCallbacks.revealLockedOverlay,
-            )
-            .playerSurfaceDragGestures(
-                gestureController = gestureController,
-                playerController = playerController,
-                layoutSize = layoutSize,
-                playbackGesturesEnabled = playbackGesturesEnabled,
-                sideGestureSystemEdgeExclusionPx = sideGestureSystemEdgeExclusionPx,
-                playerControlsLockedState = gestureCallbacks.playerControlsLocked,
-                touchGesturesEnabledState = gestureCallbacks.touchGesturesEnabled,
-                swipeToSeekEnabledState = gestureCallbacks.swipeToSeekEnabled,
-                isHoldToSpeedGestureActiveState = gestureCallbacks.isHoldToSpeedGestureActive,
-                currentPositionMsState = gestureCallbacks.currentPositionMs,
-                currentDurationMsState = gestureCallbacks.currentDurationMs,
-                deactivateHoldToSpeedState = gestureCallbacks.deactivateHoldToSpeed,
-                showHorizontalSeekPreviewState = gestureCallbacks.showHorizontalSeekPreview,
-                showBrightnessFeedbackState = gestureCallbacks.showBrightnessFeedback,
-                showVolumeFeedbackState = gestureCallbacks.showVolumeFeedback,
-                clearLiveGestureFeedbackState = gestureCallbacks.clearLiveGestureFeedback,
-                revealLockedOverlayState = gestureCallbacks.revealLockedOverlay,
-                commitHorizontalSeekState = gestureCallbacks.commitHorizontalSeek,
-            ),
-    ) {
-        val playerSurfaceSourceUrl = if (isP2pPlaybackActive) p2pResolvedSourceUrl else activePlaybackSourceUrl
-        val playbackKey = activePlaybackKey
-        val initialPositionRequestKey = currentInitialPositionRequestKey()
-        if (playerSurfaceSourceUrl != null) {
-            key(playbackKey) {
-                val active = remember { mutableStateOf(true) }
-                DisposableEffect(Unit) {
-                    onDispose { active.value = false }
-                }
-                PlatformPlayerSurface(
-                    sourceUrl = playerSurfaceSourceUrl,
-                    sourceAudioUrl = activeSourceAudioUrl,
-                    sourceHeaders = activeSourceHeaders,
-                    sourceResponseHeaders = activeSourceResponseHeaders,
-                    externalSubtitles = externalSubtitles,
-                    streamType = activeStreamType,
-                    modifier = Modifier.fillMaxSize(),
-                    playWhenReady = shouldPlay,
-                    initialPositionMs = activeInitialPositionMs.takeIf { it > 0L },
-                    initialPositionRequestKey = initialPositionRequestKey,
-                    resizeMode = resizeMode,
-                    playbackEngine = playbackEngineOverride,
-                    onInitialPositionHandled = { key, handled ->
-                        if (active.value && playbackKey == activePlaybackKey && key == currentInitialPositionRequestKey()) {
-                            initialSeekApplied = handled
-                        }
-                    },
-                    onControllerReady = { controller ->
-                        if (active.value && playbackKey == activePlaybackKey) {
-                            playerController = controller
-                            playerControllerSourceUrl = playerSurfaceSourceUrl
-                        }
-                    },
-                    onSnapshot = { snapshot ->
-                        if (!active.value || !updatePlaybackSnapshot(snapshot, playbackKey)) return@PlatformPlayerSurface
-                        checkAutoSubtitleRewindWatermark(snapshot.positionMs)
-                        refreshAudioTracksIfChanged()
-                        if (!snapshot.isLoading) initialLoadCompleted = true
-                        if (snapshot.isEnded) {
-                            shouldPlay = false
-                            controlsVisible = !playerControlsLocked
-                        }
-                    },
-                    onError = { message ->
-                        if (!active.value || playbackKey != activePlaybackKey) return@PlatformPlayerSurface
-                        if (message != null && trySkipUnplayableSourceAfterError(message)) {
-                            return@PlatformPlayerSurface
-                        }
-                        if (message != null && tryRefreshCredentialedSourceAfterError(message)) {
-                            return@PlatformPlayerSurface
-                        }
-                        errorMessage = message
-                        if (message != null) {
-                            scrubbingPositionMs = null
-                            controlsVisible = !playerControlsLocked
-                            removeFailedStreamFromCache()
-                        }
-                    },
-                )
+@Composable
+internal fun PlayerScreenRuntime.PlayerSurface() {
+    val isP2pPlaybackActive = activeTorrentInfoHash != null
+    val playerSurfaceSourceUrl = if (isP2pPlaybackActive) p2pResolvedSourceUrl else activePlaybackSourceUrl
+    val playbackKey = activePlaybackKey
+    val initialPositionRequestKey = currentInitialPositionRequestKey()
+    if (playerSurfaceSourceUrl != null) {
+        key(playbackKey) {
+            val active = remember { mutableStateOf(true) }
+            DisposableEffect(Unit) {
+                onDispose { active.value = false }
             }
-        }
-
-        if (!isMiniPresentation) {
-        AnimatedVisibility(
-            visible = playerSettingsUiState.pauseOverlayEnabled && pausedOverlayVisible && !controlsVisible && !playerControlsLocked,
-            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 180)),
-        ) {
-            PauseMetadataOverlay(
-                title = if (isLiveTvPlayback) activeStreamTitle else title,
-                logo = if (isLiveTvPlayback) activeLogo else logo,
-                isEpisode = isEpisode,
-                seasonNumber = activeSeasonNumber,
-                episodeNumber = activeEpisodeNumber,
-                episodeTitle = activeEpisodeTitle,
-                pauseDescription = activePauseDescription ?: activeStreamSubtitle,
-                providerName = activeProviderName,
-                metrics = metrics,
-                horizontalSafePadding = horizontalSafePadding,
+            PlatformPlayerSurface(
+                sourceUrl = playerSurfaceSourceUrl,
+                sourceAudioUrl = activeSourceAudioUrl,
+                sourceHeaders = activeSourceHeaders,
+                sourceResponseHeaders = activeSourceResponseHeaders,
+                externalSubtitles = externalSubtitles,
+                streamType = activeStreamType,
                 modifier = Modifier.fillMaxSize(),
+                playWhenReady = shouldPlay,
+                initialPositionMs = activeInitialPositionMs.takeIf { it > 0L },
+                initialPositionRequestKey = initialPositionRequestKey,
+                resizeMode = resizeMode,
+                playbackEngine = playbackEngineOverride,
+                onInitialPositionHandled = { key, handled ->
+                    if (active.value && playbackKey == activePlaybackKey && key == currentInitialPositionRequestKey()) {
+                        initialSeekApplied = handled
+                    }
+                },
+                onControllerReady = { controller ->
+                    if (active.value && playbackKey == activePlaybackKey) {
+                        playerController = controller
+                        playerControllerSourceUrl = playerSurfaceSourceUrl
+                    }
+                },
+                onSnapshot = { snapshot ->
+                    if (!active.value || !updatePlaybackSnapshot(snapshot, playbackKey)) return@PlatformPlayerSurface
+                    checkAutoSubtitleRewindWatermark(snapshot.positionMs)
+                    refreshAudioTracksIfChanged()
+                    if (!snapshot.isLoading) initialLoadCompleted = true
+                    if (snapshot.isEnded) {
+                        shouldPlay = false
+                        controlsVisible = !playerControlsLocked
+                    }
+                },
+                onError = { message ->
+                    if (!active.value || playbackKey != activePlaybackKey) return@PlatformPlayerSurface
+                    if (message != null && trySkipUnplayableSourceAfterError(message)) {
+                        return@PlatformPlayerSurface
+                    }
+                    if (message != null && tryRefreshCredentialedSourceAfterError(message)) {
+                        return@PlatformPlayerSurface
+                    }
+                    errorMessage = message
+                    if (message != null) {
+                        scrubbingPositionMs = null
+                        controlsVisible = !playerControlsLocked
+                        removeFailedStreamFromCache()
+                    }
+                },
             )
-        }
-
-        RenderPlayerControls(isEpisode = isEpisode)
-        RenderPlaybackOverlays(
-            runtime = runtime,
-            currentGestureFeedback = currentGestureFeedback,
-            p2pInitialLoadingMessage = p2pInitialLoadingMessage,
-            p2pInitialLoadingProgress = p2pInitialLoadingProgress,
-            showP2pRebufferStats = showP2pRebufferStats,
-            p2pRebufferMessage = p2pRebufferMessage,
-            p2pRebufferProgress = p2pRebufferProgress,
-        )
-        SubtitleSyncByEarCard(
-            visible = showSubtitleSyncByEar,
-            subtitleDelayMs = subtitleDelayMs,
-            heardCaptured = subtitleSyncHeardPositionMs != null,
-            sawCaptured = subtitleSyncSawPositionMs != null,
-            onHeard = { captureSubtitleSyncHeard() },
-            onSaw = { captureSubtitleSyncSaw() },
-            onClose = { closeSubtitleSyncByEar() },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 16.dp, start = horizontalSafePadding, end = horizontalSafePadding),
-        )
-        RenderPlayerModals()
         }
     }
 }

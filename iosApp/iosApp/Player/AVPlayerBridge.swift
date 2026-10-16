@@ -47,9 +47,32 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     private var addonSubtitleNames: [String: String] = [:] // subtitle URL → rendition name
     private var subtitleDelayReload: DispatchWorkItem?
     private var backgroundObserver: NSObjectProtocol?
+    private var playingObservation: NSKeyValueObservation?
+
+    // The next episode's player is created before the previous one is destroyed.
+    private static var liveCount = 0
+    // With the iPad locked, iOS suspends a background-audio app soon after its audio stops, so the app is kept
+    // running from the end of an episode (or a player being replaced) until the next one plays.
+    private static var gapTask = UIBackgroundTaskIdentifier.invalid
+
+    private static func holdGap() {
+        guard gapTask == .invalid else { return }
+        gapTask = UIApplication.shared.beginBackgroundTask(withName: "Next episode") { releaseGap() }
+    }
+
+    private static func releaseGap() {
+        guard gapTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(gapTask)
+        gapTask = .invalid
+    }
 
     override init() {
         super.init()
+        Self.liveCount += 1
+        playingObservation = player.observe(\.timeControlStatus, options: [.new]) { player, _ in
+            guard player.timeControlStatus == .playing else { return }
+            DispatchQueue.main.async { Self.releaseGap() }
+        }
         player.allowsExternalPlayback = true
         player.usesExternalPlaybackWhileExternalScreenIsActive = true
         externalObservation = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { player, _ in
@@ -171,7 +194,10 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in self?.isEnded = true }
+        ) { [weak self] _ in
+            self?.isEnded = true
+            Self.holdGap()
+        }
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 if item.status == .failed { Self.logFailure(item) }
@@ -517,9 +543,16 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         endObserver = nil
         statusObservation = nil
         externalObservation = nil
+        playingObservation = nil
         let center = nowPlaying.remoteCommandCenter
         [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand, center.changePlaybackPositionCommand]
             .forEach { $0.removeTarget(nil) }
+        Self.liveCount -= 1
+        guard Self.liveCount == 0 else {
+            // Replaced by the next episode's player: keep the audio session, and the app, until it plays.
+            Self.holdGap()
+            return
+        }
         MPVPlayerViewController.audioSessionQueue.async {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }

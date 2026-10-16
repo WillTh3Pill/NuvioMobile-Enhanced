@@ -1,13 +1,22 @@
 package com.nuvio.app.features.player
 
+import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Composition
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MonotonicFrameClock
+import androidx.compose.runtime.Recomposer
+import androidx.compose.runtime.currentCompositionLocalContext
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -28,8 +37,13 @@ import co.touchlab.kermit.Logger
 import com.nuvio.app.core.logging.InAppLogger
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.time.TimeSource
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import nuvio.composeapp.generated.resources.Res
@@ -471,6 +485,14 @@ actual fun PlatformPlayerSurface(
         }
     }
 
+    if (LocalInPlaybackLogicHost.current) {
+        DisposableEffect(bridge) {
+            playbackVideoBridge = bridge
+            onDispose { if (playbackVideoBridge === bridge) playbackVideoBridge = null }
+        }
+        return
+    }
+
     // Render the player view
     Box(modifier = modifier) {
         UIKitViewController(
@@ -526,6 +548,86 @@ actual fun PlatformPlayerSurface(
             }
         }
     }
+}
+
+private val LocalInPlaybackLogicHost = staticCompositionLocalOf { false }
+
+// ponytail: one slot, so one player screen shows video at a time (MiniPlayerController hosts one runtime);
+// key it by host if two ever need to.
+private var playbackVideoBridge by mutableStateOf<NuvioPlayerBridge?>(null)
+
+actual val playerSurfaceInLogicHost: Boolean = true
+
+/**
+ * Runs [content] in a composition of its own, recomposed on its own clock. The app's composition only
+ * recomposes while it renders, and Compose stops rendering when the app goes to the background, but playback
+ * logic such as starting the next episode on a connected display with the iPad locked has to keep going.
+ */
+@Composable
+actual fun PlaybackLogicHost(content: @Composable () -> Unit) {
+    val latestContent = rememberUpdatedState(content)
+    val latestLocals = rememberUpdatedState(currentCompositionLocalContext)
+    DisposableEffect(Unit) {
+        val scope = CoroutineScope(Dispatchers.Main + PlaybackLogicFrameClock)
+        val recomposer = Recomposer(scope.coroutineContext)
+        scope.launch { recomposer.runRecomposeAndApplyChanges() }
+        // A recomposer sees state written outside a composition once apply notifications are sent; send them
+        // here instead of relying on the app's composition.
+        var applyScheduled = false
+        val writeObserver = Snapshot.registerGlobalWriteObserver {
+            if (!applyScheduled) {
+                applyScheduled = true
+                scope.launch {
+                    applyScheduled = false
+                    Snapshot.sendApplyNotifications()
+                }
+            }
+        }
+        val composition = Composition(NoUiApplier(), recomposer)
+        composition.setContent {
+            CompositionLocalProvider(latestLocals.value) {
+                CompositionLocalProvider(LocalInPlaybackLogicHost provides true) { latestContent.value() }
+            }
+        }
+        onDispose {
+            composition.dispose()
+            writeObserver.dispose()
+            recomposer.cancel()
+            scope.cancel()
+        }
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+@Composable
+actual fun PlaybackVideo(modifier: Modifier) {
+    val bridge = playbackVideoBridge ?: return
+    key(bridge) {
+        UIKitViewController(
+            factory = { bridge.createPlayerViewController() },
+            modifier = modifier,
+            interactive = false,
+        )
+    }
+}
+
+/** Frames at display rate, whether or not the app is on screen. */
+private object PlaybackLogicFrameClock : MonotonicFrameClock {
+    private val start = TimeSource.Monotonic.markNow()
+
+    override suspend fun <R> withFrameNanos(onFrame: (frameTimeNanos: Long) -> R): R {
+        delay(16L)
+        return onFrame(start.elapsedNow().inWholeNanoseconds)
+    }
+}
+
+/** Playback logic emits no UI. */
+private class NoUiApplier : AbstractApplier<Unit>(Unit) {
+    override fun insertTopDown(index: Int, instance: Unit) {}
+    override fun insertBottomUp(index: Int, instance: Unit) {}
+    override fun remove(index: Int, count: Int) {}
+    override fun move(from: Int, to: Int, count: Int) {}
+    override fun onClear() {}
 }
 
 private fun NuvioPlayerBridge.applyIosVideoOutputSettings(settings: PlayerSettingsUiState) {

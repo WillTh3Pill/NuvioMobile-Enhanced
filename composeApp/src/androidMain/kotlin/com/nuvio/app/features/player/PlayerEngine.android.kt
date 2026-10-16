@@ -3520,3 +3520,12 @@ internal class SubtitleRequestHeaderDataSource(
         upstream.close()
     }
 }
+
+// Android keeps playback logic in place, with the rest of the player UI.
+@Composable
+actual fun PlaybackLogicHost(content: @Composable () -> Unit) = content()
+
+actual val playerSurfaceInLogicHost: Boolean = false
+
+@Composable
+actual fun PlaybackVideo(modifier: Modifier) = Unit

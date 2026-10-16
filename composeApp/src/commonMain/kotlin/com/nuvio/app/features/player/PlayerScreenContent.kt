@@ -179,7 +179,13 @@ internal fun PlayerScreenContent(args: PlayerScreenArgs) {
             )
         }
         runtime.BindMiniPlayerEffects(miniPresentation)
-        runtime.BindPlayerRuntimeEffects()
+        PlaybackLogicHost {
+            // Also here because the UI above doesn't recompose while the app is in the background on iOS.
+            runtime.resetIdentityStateIfNeeded()
+            runtime.BindPlayerRuntimeEffects()
+            runtime.BindPlaybackSourceEffects()
+            if (playerSurfaceInLogicHost) runtime.PlayerSurface()
+        }
         runtime.RenderPlayerRuntimeUi()
     }
 }

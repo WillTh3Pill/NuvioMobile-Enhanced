@@ -109,3 +109,19 @@ expect fun PlatformPlayerSurface(
     onSnapshot: (PlayerPlaybackSnapshot) -> Unit,
     onError: (String?) -> Unit,
 )
+
+/**
+ * Hosts the player's playback logic: track and source effects, switching to the next episode, and (where
+ * [playerSurfaceInLogicHost]) the player surface. On iOS, Compose stops recomposing while the app is in the
+ * background, e.g. with the iPad locked and video on a connected display, so [content] runs in its own
+ * composition there and must not emit UI. Elsewhere it runs in place.
+ */
+@Composable
+expect fun PlaybackLogicHost(content: @Composable () -> Unit)
+
+/** Whether the player surface belongs in [PlaybackLogicHost], its video then shown by [PlaybackVideo]. */
+expect val playerSurfaceInLogicHost: Boolean
+
+/** Shows the video of the player surface inside [PlaybackLogicHost]. */
+@Composable
+expect fun PlaybackVideo(modifier: Modifier)
