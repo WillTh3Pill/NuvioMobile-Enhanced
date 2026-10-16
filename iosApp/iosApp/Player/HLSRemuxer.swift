@@ -90,6 +90,7 @@ final class HLSRemuxer {
     private var variantAttributes = "" // everything but CODECS
     private var mediaCodecs: [String]? // video + audio formats; nil when the video codec string can't be read
     private var masterVersion = 0
+    private var loggedMasterPlaylist = false
     private var subtitleDelay = 0.0
     private var videoInit: Data?
     private var audioInits: [Int: Data] = [:]
@@ -136,7 +137,7 @@ final class HLSRemuxer {
                     }
                 }
             } catch {
-                self.record(error)
+                if !self.abortFlag.isSet { self.record(error) } // a superseded load isn't an error worth logging
                 finish(.failure(error))
             }
         }
@@ -278,14 +279,15 @@ final class HLSRemuxer {
                     }
                 }
                 let channelCount = parameters.pointee.ch_layout.nb_channels
-                let isAtmos = codec == AV_CODEC_ID_EAC3 && parameters.pointee.profile == 30 // AV_PROFILE_EAC3_DDP_ATMOS
                 let base = title ?? language.flatMap { Locale.current.localizedString(forLanguageCode: $0) } ?? "Audio \(audioTracks.count + 1)"
                 let detail = "\(Self.codecLabel(parameters)) \(Self.channelLabel(channelCount))"
                 audioTracks.append(AudioTrack(
                     streamIndex: index,
                     name: Self.unique("\(base) (\(detail))", in: &audioNames),
                     language: language,
-                    channels: isAtmos ? "16/JOC" : "\(channelCount)",
+                    // Plain channel count: playlists declaring Atmos ("16/JOC", "ec+3") were rejected outright on
+                    // iPadOS 16 (suspected cause). Atmos is still signalled by the bitstream itself.
+                    channels: "\(channelCount)",
                     codecString: copy ? Self.audioCodecString(parameters) : "fLaC",
                     isDefault: false,
                     transcoder: transcoder
@@ -379,13 +381,15 @@ final class HLSRemuxer {
         }
         let hasSubtitles = !subtitleTracks.isEmpty || !externalSubtitles.isEmpty
         text += "#EXT-X-STREAM-INF:\(variantAttributes),CLOSED-CAPTIONS=NONE"
-        // Every format any rendition carries; left out entirely rather than guessed.
-        if let mediaCodecs {
-            text += ",CODECS=\"\((mediaCodecs + (hasSubtitles ? ["wvtt"] : [])).joined(separator: ","))\""
-        }
+        // Video and audio formats; left out entirely rather than guessed. WebVTT's "wvtt" is optional and left out.
+        if let mediaCodecs { text += ",CODECS=\"\(mediaCodecs.joined(separator: ","))\"" }
         if !audioTracks.isEmpty { text += ",AUDIO=\"audio\"" }
         if hasSubtitles { text += ",SUBTITLES=\"subs\"" }
         text += "\nvideo.m3u8\n"
+        if !loggedMasterPlaylist {
+            loggedMasterPlaylist = true
+            InAppLogBridge.shared.info(tag: "Player/Remux", message: "playlist:\n\(text.prefix(4000))")
+        }
         return Data(text.utf8)
     }
 
@@ -1004,7 +1008,7 @@ final class HLSRemuxer {
     private static func audioCodecString(_ parameters: UnsafeMutablePointer<AVCodecParameters>) -> String {
         switch parameters.pointee.codec_id {
         case AV_CODEC_ID_AC3: return "ac-3"
-        case AV_CODEC_ID_EAC3: return parameters.pointee.profile == 30 ? "ec+3" : "ec-3" // AV_PROFILE_EAC3_DDP_ATMOS
+        case AV_CODEC_ID_EAC3: return "ec-3"
         case AV_CODEC_ID_FLAC: return "fLaC"
         case AV_CODEC_ID_ALAC: return "alac"
         default:
@@ -1088,7 +1092,9 @@ final class HLSRemuxer {
     /// ISO 639-2 ("eng") to the RFC 5646 tag HLS expects ("en"); nil when unknown.
     private static func languageTag(_ raw: String?) -> String? {
         guard let raw, !raw.isEmpty, raw.lowercased() != "und" else { return nil }
-        let tag = Locale.canonicalLanguageIdentifier(from: raw)
+        // Only letters, digits and hyphens are valid in an RFC 5646 tag (and inside the quoted attribute).
+        let tag = Locale.canonicalLanguageIdentifier(from: raw).replacingOccurrences(of: "_", with: "-")
+            .filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
         return tag.isEmpty ? nil : tag
     }
 

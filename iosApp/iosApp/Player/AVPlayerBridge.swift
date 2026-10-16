@@ -14,7 +14,6 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     private lazy var playerView: PlayerLayerView = {
         let view = PlayerLayerView()
         view.backgroundColor = .black
-        view.playerLayer.player = player
         return view
     }()
     private lazy var playerVC: UIViewController = {
@@ -47,6 +46,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     private var restoresSubtitleSelection = false
     private var addonSubtitleNames: [String: String] = [:] // subtitle URL → rendition name
     private var subtitleDelayReload: DispatchWorkItem?
+    private var backgroundObserver: NSObjectProtocol?
 
     override init() {
         super.init()
@@ -54,6 +54,18 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         player.usesExternalPlaybackWhileExternalScreenIsActive = true
         externalObservation = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { player, _ in
             InAppLogBridge.shared.info(tag: "Player/External", message: Self.externalPlaybackState(player))
+        }
+        ExternalDisplay.shared.attach(self) { [weak self] in self?.routeVideo() }
+        routeVideo()
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            InAppLogBridge.shared.info(tag: "Player/External", message: "iPad locked/backgrounded: \(self.playbackState())")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self else { return }
+                InAppLogBridge.shared.info(tag: "Player/External", message: "3s after locking: \(self.playbackState())")
+            }
         }
         let center = nowPlaying.remoteCommandCenter
         center.playCommand.addTarget { [weak self] _ in self?.play(); return .success }
@@ -71,6 +83,27 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     }
 
     func createPlayerViewController() -> UIViewController { playerVC }
+
+    /// A player draws on one layer at a time: the connected display's while there is one, otherwise the iPad's.
+    private func routeVideo() {
+        let display = ExternalDisplay.shared
+        if display.isConnected {
+            playerView.playerLayer.player = nil
+            display.present(player)
+        } else {
+            display.present(nil)
+            playerView.playerLayer.player = player
+        }
+        player.usesExternalPlaybackWhileExternalScreenIsActive = true
+        InAppLogBridge.shared.info(
+            tag: "Player/External",
+            message: "video on \(display.isConnected ? "connected display" : "iPad"): \(Self.externalPlaybackState(player))"
+        )
+    }
+
+    private func playbackState() -> String {
+        "status=\(player.timeControlStatus.rawValue) rate=\(player.rate) \(Self.externalPlaybackState(player))"
+    }
 
     func loadFile(url: String) {
         loadFileWithAudio(videoUrl: url, audioUrl: nil, headersJson: nil, subtitlesJson: nil)
@@ -141,6 +174,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         ) { [weak self] _ in self?.isEnded = true }
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
+                if item.status == .failed { Self.logFailure(item) }
                 guard let self, item === self.player.currentItem, item.status == .readyToPlay, let seek = self.pendingSeek else { return }
                 self.pendingSeek = nil
                 self.player.seek(to: seek, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -299,6 +333,22 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         return Int64(seconds * 1000)
     }
 
+    /// AVPlayer's "Cannot Open" hides the reason; the underlying error and the access/error logs carry it.
+    private static func logFailure(_ item: AVPlayerItem) {
+        var lines: [String] = []
+        if let error = item.error as NSError? {
+            lines.append("error \(error.domain) \(error.code): \(error.localizedDescription)")
+            if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+                lines.append("underlying \(underlying.domain) \(underlying.code): \(underlying.localizedDescription)")
+            }
+            if let reason = error.localizedFailureReason { lines.append("reason: \(reason)") }
+        }
+        for event in item.errorLog()?.events ?? [] {
+            lines.append("errorLog \(event.errorDomain) \(event.errorStatusCode) \(event.errorComment ?? "") uri=\(event.uri ?? "")")
+        }
+        InAppLogBridge.shared.error(tag: "Player/AVPlayer", message: lines.joined(separator: " | "))
+    }
+
     private static func externalPlaybackState(_ player: AVPlayer) -> String {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType.rawValue)
         return "externalPlaybackActive=\(player.isExternalPlaybackActive) allows=\(player.allowsExternalPlayback) " +
@@ -455,6 +505,9 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     func getProperty(name: String) -> String { "" }
 
     func destroy() {
+        ExternalDisplay.shared.detach(self)
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
+        backgroundObserver = nil
         remuxer?.stop()
         remuxer = nil
         subtitleDelayReload?.cancel()
