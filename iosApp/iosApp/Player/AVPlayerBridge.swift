@@ -60,7 +60,7 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
         subtitleGroup = nil
         lastLoad = (videoUrl, headersJson)
         if let audioUrl, !audioUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            unsupportedReason = "AVPlayer can't merge a separate audio stream"
+            unsupportedReason = "Unplayable format: AVPlayer can't merge a separate audio stream"
             return
         }
         guard let url = URL(string: videoUrl) else {
@@ -183,7 +183,8 @@ final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     // MARK: State (polled from Kotlin every 250ms)
 
     func getIsLoading() -> Bool {
-        guard let item = player.currentItem else { return unsupportedReason.isEmpty }
+        // Like mpv, a source that failed to open still counts as loading, so nothing seeks into it.
+        guard let item = player.currentItem, item.status != .failed else { return true }
         return item.status == .unknown || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
     }
 

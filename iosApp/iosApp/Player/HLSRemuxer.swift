@@ -127,10 +127,10 @@ final class HLSRemuxer {
 
         videoIndex = av_find_best_stream(opened, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
         guard videoIndex >= 0, let video = opened.pointee.streams[Int(videoIndex)],
-              let videoParameters = video.pointee.codecpar else { throw RemuxError("the stream has no video") }
+              let videoParameters = video.pointee.codecpar else { throw RemuxError.unplayable("the stream has no video") }
         let videoCodec = videoParameters.pointee.codec_id
         guard videoCodec == AV_CODEC_ID_H264 || videoCodec == AV_CODEC_ID_HEVC else {
-            throw RemuxError("AVPlayer can't play \(Self.codecName(videoCodec)) video")
+            throw RemuxError.unplayable("AVPlayer can't play \(Self.codecName(videoCodec)) video")
         }
 
         let preferredAudio = av_find_best_stream(opened, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
@@ -145,7 +145,7 @@ final class HLSRemuxer {
         if !audioCodecs.isEmpty && copyable.isEmpty {
             // ponytail: DTS/TrueHD-only files stop here; next step is decoding them to ALAC (lossless) here.
             let names = audioCodecs.map(Self.codecName).joined(separator: ", ")
-            throw RemuxError("this file's audio (\(names)) needs lossless conversion, which isn't built yet")
+            throw RemuxError.unplayable("this file's audio (\(names)) needs lossless conversion, which isn't built yet")
         }
         audioIndex = copyable.contains(preferredAudio) ? preferredAudio : (copyable.first ?? -1)
         for index in 0..<Int(opened.pointee.nb_streams) where Int32(index) != videoIndex && Int32(index) != audioIndex {
@@ -162,7 +162,7 @@ final class HLSRemuxer {
         }
         let sortedKeyframes = keyframes.sorted()
         guard sortedKeyframes.count >= 2 else {
-            throw RemuxError("the file has no keyframe index to build a seekable playlist from")
+            throw RemuxError.unplayable("the file has no keyframe index to build a seekable playlist from")
         }
 
         let timeBase = video.pointee.time_base
@@ -173,7 +173,7 @@ final class HLSRemuxer {
         } else if video.pointee.duration > 0 {
             end = (video.pointee.start_time == Self.noPts ? 0 : video.pointee.start_time) + video.pointee.duration
         }
-        guard end != Self.noPts, end > sortedKeyframes[0] else { throw RemuxError("the stream has no known length") }
+        guard end != Self.noPts, end > sortedKeyframes[0] else { throw RemuxError.unplayable("the stream has no known length") }
 
         let minimum = av_rescale_q(Self.minimumSegmentSeconds, AVRational(num: 1, den: 1), timeBase)
         var bounds = [sortedKeyframes[0]]
@@ -617,5 +617,10 @@ private struct RemuxError: LocalizedError {
 
     init(_ message: String) {
         errorDescription = message
+    }
+
+    /// The app skips to the next source on this prefix (PlayerScreenRuntimeEffects.kt).
+    static func unplayable(_ message: String) -> RemuxError {
+        RemuxError("Unplayable format: \(message)")
     }
 }

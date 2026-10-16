@@ -426,7 +426,8 @@ internal fun PlayerScreenRuntime.switchToSource(
         )
         return
     }
-    val currentPositionMs = playbackSnapshot.positionMs.coerceAtLeast(0L)
+    // A source that never loaded has no position yet; keep its pending resume point.
+    val currentPositionMs = if (initialLoadCompleted) playbackSnapshot.positionMs.coerceAtLeast(0L) else activeInitialPositionMs
     flushWatchProgress()
     stopActiveP2pStream()
     val currentVideoId = activeVideoId

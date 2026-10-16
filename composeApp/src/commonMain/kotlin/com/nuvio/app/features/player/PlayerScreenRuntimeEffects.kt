@@ -1,6 +1,7 @@
 package com.nuvio.app.features.player
 
 import com.nuvio.app.core.i18n.localizedSeasonEpisodeCode
+import com.nuvio.app.core.logging.InAppLogger
 import com.nuvio.app.core.ui.NuvioToastController
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.shuffle.EpisodeShuffleRepository
@@ -984,5 +985,64 @@ private fun SkipInterval.isIntroLikeSkipInterval(): Boolean =
     }
 
 private const val SKIP_INTRO_PRE_ROLL_SECONDS = 10.0
+
+/** Error prefix the iOS AVPlayer bridge uses for streams it can never play (e.g. VC-1 video). */
+private const val UNPLAYABLE_FORMAT_PREFIX = "Unplayable format:"
+
+/** Moves on to the next untried source when the current one is in a format the player can't decode. */
+internal fun PlayerScreenRuntime.trySkipUnplayableSourceAfterError(message: String?): Boolean {
+    if (message == null || !message.startsWith(UNPLAYABLE_FORMAT_PREFIX)) return false
+    val currentVideoId = activeVideoId ?: return false
+    if (unplayableSkipJob?.isActive == true) return true
+    if (unplayableSourcesVideoId != currentVideoId) {
+        unplayableSourceKeys.clear()
+        unplayableSourcesVideoId = currentVideoId
+    }
+    unplayableSourceKeys += listOfNotNull(
+        activeSourceUrl,
+        activeSourceIdentityKey,
+        "$activeProviderAddonId|$activeStreamTitle|$activeStreamSubtitle",
+    )
+    removeFailedStreamFromCache()
+
+    val type = contentType ?: parentMetaType
+    val season = activeSeasonNumber
+    val episode = activeEpisodeNumber
+    errorMessage = null
+    unplayableSkipJob = scope.launch {
+        try {
+            PlayerStreamsRepository.loadSources(type = type, videoId = currentVideoId, season = season, episode = episode)
+            var next: StreamItem? = null
+            var pollCount = 0
+            while (pollCount < CREDENTIAL_REFRESH_POLL_COUNT) {
+                val state = PlayerStreamsRepository.sourceState.value
+                next = state.groups.flatMap { it.streams }.firstOrNull { stream ->
+                    listOfNotNull(
+                        stream.playableDirectUrl,
+                        stream.playerSourceIdentityKey(),
+                        "${stream.addonId}|${stream.streamLabel}|${stream.streamSubtitle}",
+                    ).none { it in unplayableSourceKeys }
+                }
+                if (next != null || state.emptyStateReason != null || (!state.isAnyLoading && state.groups.isNotEmpty())) {
+                    break
+                }
+                delay(CREDENTIAL_REFRESH_POLL_INTERVAL_MS)
+                pollCount++
+            }
+            val stream = next
+            if (stream == null) {
+                errorMessage = message.removePrefix(UNPLAYABLE_FORMAT_PREFIX).trim()
+                controlsVisible = !playerControlsLocked
+                return@launch
+            }
+            InAppLogger.info("Player/Source", "skipping unplayable source ($message); trying ${stream.streamLabel}")
+            switchToSource(stream)
+        } finally {
+            PlayerStreamsRepository.stopSourcesLoading()
+        }
+    }
+    return true
+}
+
 private const val CREDENTIAL_REFRESH_POLL_COUNT = 30
 private const val CREDENTIAL_REFRESH_POLL_INTERVAL_MS = 500L

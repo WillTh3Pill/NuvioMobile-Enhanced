@@ -217,6 +217,11 @@ internal class PlayerScreenRuntime(
     var pendingP2pSwitch by mutableStateOf<PendingPlayerP2pSwitch?>(null)
     var credentialRefreshJob by mutableStateOf<Job?>(null)
     var credentialRefreshAttemptedSourceUrl by mutableStateOf<String?>(null)
+    var unplayableSkipJob by mutableStateOf<Job?>(null)
+    // Sources that failed with a format the player can never decode, kept per video so automatic
+    // skipping can't bounce between two of them.
+    val unplayableSourceKeys = mutableSetOf<String>()
+    var unplayableSourcesVideoId: String? = null
 
     var showAudioModal by mutableStateOf(false)
     var showSubtitleModal by mutableStateOf(false)
