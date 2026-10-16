@@ -12,9 +12,22 @@ import ComposeApp
 /// PlayerEngine.ios.kt falls back to mpv.
 final class AVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
 
-    // ponytail: UIScreen.screens is deprecated since iOS 16 but is still the only API that sees a
-    // mirrored screen (mirroring opens no scene session). Swap it out if Apple removes it.
-    static var isExternalDisplayConnected: Bool { UIScreen.screens.count > 1 }
+    // Any one signal counts: which of them fires varies with iPadOS version and with mirroring vs.
+    // extended mode, and a scene-based app may not see a mirrored dock in UIScreen.screens at all.
+    // The HDMI/DisplayPort audio route is what the dock itself reports.
+    static var isExternalDisplayConnected: Bool {
+        let screens = UIScreen.screens.count
+        let externalScene = UIApplication.shared.connectedScenes.contains {
+            $0.session.role == .windowExternalDisplayNonInteractive
+        }
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType)
+        let videoRoute = outputs.contains { $0 == .HDMI || $0 == .displayPort }
+        InAppLogBridge.shared.info(
+            tag: "Player/ExternalDisplay",
+            message: "screens=\(screens) externalScene=\(externalScene) audioOutputs=\(outputs.map(\.rawValue))"
+        )
+        return screens > 1 || externalScene || videoRoute
+    }
 
     private let player = AVPlayer()
     private lazy var playerVC: AVPlayerViewController = {
